@@ -1,0 +1,894 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Calendar, Clock, BookOpen, CheckCircle, Plus, RefreshCw, Trash2, FileText, Book, Bell, Repeat, AlertCircle, Coffee, Target, MapPin, Navigation, Map } from 'lucide-react';
+
+// 유틸리티: HH:MM 문자열을 분(minute)으로 변환
+const timeToMinutes = (timeStr) => {
+  if (!timeStr) return 0;
+  const [h, m] = timeStr.split(':').map(Number);
+  return h * 60 + m;
+};
+
+// 유틸리티: 분(minute)을 HH:MM 문자열로 변환
+const minutesToTime = (mins) => {
+  const h = Math.floor(mins / 60).toString().padStart(2, '0');
+  const m = (mins % 60).toString().padStart(2, '0');
+  return `${h}:${m}`;
+};
+
+// 마감일 포맷팅 헬퍼
+const formatDeadline = (isoString) => {
+  if (!isoString) return '';
+  const d = new Date(isoString);
+  return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+};
+
+// 랜덤 색상 생성기
+const generateColor = (category) => {
+  const colors = {
+    academy: ['#F87171', '#FB923C', '#FBBF24'], 
+    meal: ['#FDBA74', '#F9A8D4'], 
+    sleep: ['#93C5FD', '#A78BFA'], 
+    travel: ['#94A3B8', '#CBD5E1'], 
+    todo: ['#34D399', '#10B981', '#059669'], 
+    subject: ['#60A5FA', '#3B82F6', '#818CF8'], 
+    special: ['#F43F5E', '#E11D48'] 
+  };
+  const palette = colors[category] || colors.other;
+  return palette[Math.floor(Math.random() * palette.length)];
+};
+
+// 🗺️ 네이버 지도 스타일 가상 경로 생성기
+const generateMockRoute = (from, to, durationMin) => {
+  const isSubway = Math.random() > 0.4; // 60% 확률로 버스
+  const walkStart = Math.floor(Math.random() * 5) + 3; // 3~7분 걷기
+  const walkEnd = Math.floor(Math.random() * 5) + 3;
+  const transitTime = Math.max(5, durationMin - walkStart - walkEnd);
+
+  if (durationMin <= 20) {
+    return [
+      { type: 'walk', icon: '🚶‍♂️', title: '도보 이동', desc: `${from}에서 출발하여 목적지까지 걷기`, time: durationMin }
+    ];
+  }
+
+  if (isSubway) {
+    const lines = ['2호선', '3호선', '9호선', '수인분당선', '신분당선'];
+    const line = lines[Math.floor(Math.random() * lines.length)];
+    return [
+      { type: 'walk', icon: '🚶‍♂️', title: '가까운 지하철역으로 도보 이동', desc: `${from} 출입구 방향`, time: walkStart },
+      { type: 'transit', icon: '🚇', title: `지하철 ${line} 탑승`, desc: `${Math.floor(transitTime/3)}개 역 이동 후 하차`, time: transitTime },
+      { type: 'walk', icon: '🚶‍♂️', title: '도보 이동', desc: `${to} 도착`, time: walkEnd }
+    ];
+  } else {
+    const busNum = [145, 421, 740, 360, 641, 110, 144][Math.floor(Math.random() * 7)];
+    return [
+      { type: 'walk', icon: '🚶‍♂️', title: '버스 정류장으로 도보 이동', desc: '약 300m 이동', time: walkStart },
+      { type: 'transit', icon: '🚌', title: `간선/지선버스 ${busNum}번 탑승`, desc: `${Math.floor(transitTime/4)}개 정류장 이동 후 하차`, time: transitTime },
+      { type: 'walk', icon: '🚶‍♂️', title: '도보 이동', desc: `${to} 도착`, time: walkEnd }
+    ];
+  }
+};
+
+export default function App() {
+  const [currentDate, setCurrentDate] = useState(new Date().toISOString().split('T')[0]);
+  const [events, setEvents] = useState([]);
+  const [isGenerating, setIsGenerating] = useState(false);
+  
+  // 탭 및 달력 뷰 상태 (planner, calendar, map)
+  const [activeTab, setActiveTab] = useState('planner');
+  const [calMonth, setCalMonth] = useState(new Date().getMonth());
+  const [calYear, setCalYear] = useState(new Date().getFullYear());
+  
+  // 지도 뷰 전용 상태 (선택된 이동 경로)
+  const [selectedRoute, setSelectedRoute] = useState(null);
+
+  // 폼 상태: 고정 일정
+  const [fixedTitle, setFixedTitle] = useState('');
+  const [fixedLocation, setFixedLocation] = useState(''); 
+  const [fixedStart, setFixedStart] = useState('18:00');
+  const [fixedEnd, setFixedEnd] = useState('20:00');
+  const [fixedCategory, setFixedCategory] = useState('academy');
+  const [isRecurring, setIsRecurring] = useState(true);
+  
+  // 폼 상태: 시험/수행평가 D-Day
+  const [specialTitle, setSpecialTitle] = useState('');
+  const [specialDate, setSpecialDate] = useState('');
+  const [specialType, setSpecialType] = useState('exam');
+  
+  // 폼 상태: 과제
+  const [todoTitle, setTodoTitle] = useState('');
+  const [todoDuration, setTodoDuration] = useState('60');
+  const [todoDeadlineDate, setTodoDeadlineDate] = useState(new Date(Date.now() + 86400000).toISOString().split('T')[0]); 
+  const [todoDeadlineTime, setTodoDeadlineTime] = useState('23:59'); 
+  
+  // 폼 상태: 자율 학습
+  const [subjectTitle, setSubjectTitle] = useState('');
+  const [subjectDuration, setSubjectDuration] = useState(''); 
+
+  // 집 위치 상태
+  const [homeLocation, setHomeLocation] = useState('집');
+
+  // Daum 주소 검색
+  const [isPostcodeOpen, setIsPostcodeOpen] = useState(false);
+  const [postcodeTarget, setPostcodeTarget] = useState(null); // 'home' or 'fixed'
+  const postcodeRef = useRef(null);
+
+  const canvasRef = useRef(null);
+  const currentDayOfWeek = new Date(currentDate).getDay();
+
+  // Daum 우편번호 스크립트 로드
+  useEffect(() => {
+    const script = document.createElement('script');
+    script.src = "//t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js";
+    script.async = true;
+    document.body.appendChild(script);
+    return () => { if (document.body.contains(script)) document.body.removeChild(script); };
+  }, []);
+
+  const getEventsForDate = (dateStr) => {
+    const dayOfWeek = new Date(dateStr).getDay();
+    return events.filter(e => e.date === dateStr || (e.type === 'fixed' && e.recurringDay === dayOfWeek));
+  };
+
+  const dailyEvents = getEventsForDate(currentDate);
+  const todaySpecials = events.filter(e => e.date === currentDate && e.type === 'special');
+
+  const addFixedEvent = (e) => {
+    e.preventDefault();
+    if (!fixedTitle) return;
+    const newEvent = {
+      id: `fixed_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+      date: currentDate, type: 'fixed', category: fixedCategory, title: fixedTitle,
+      location: fixedCategory === 'meal' || fixedCategory === 'sleep' ? homeLocation : fixedLocation.trim() || homeLocation,
+      startTime: fixedStart, endTime: fixedEnd, startMin: timeToMinutes(fixedStart), endMin: timeToMinutes(fixedEnd),
+      color: generateColor(fixedCategory), completed: false, recurringDay: isRecurring ? currentDayOfWeek : undefined
+    };
+    if (newEvent.startMin >= newEvent.endMin) return alert("종료 시간이 시작 시간보다 빠를 수 없습니다.");
+    setEvents([...events, newEvent]);
+    setFixedTitle('');
+    setFixedLocation('');
+    setIsPostcodeOpen(false);
+    setPostcodeTarget(null);
+  };
+
+  const togglePostcode = (target) => {
+    if (isPostcodeOpen && postcodeTarget === target) {
+      setIsPostcodeOpen(false);
+      setPostcodeTarget(null);
+      return;
+    }
+    setPostcodeTarget(target);
+    setIsPostcodeOpen(true);
+    setTimeout(() => {
+      if (window.daum && window.daum.Postcode && postcodeRef.current) {
+        new window.daum.Postcode({
+          oncomplete: function(data) {
+            const placeName = data.buildingName ? data.buildingName : data.address;
+            const finalAddr = placeName + (data.buildingName ? ` (${data.address})` : '');
+            if (target === 'home') setHomeLocation(finalAddr);
+            else setFixedLocation(finalAddr);
+            setIsPostcodeOpen(false);
+            setPostcodeTarget(null);
+          }, width: '100%', height: '100%'
+        }).embed(postcodeRef.current);
+      } else {
+         alert('주소 검색 서비스를 불러오는 중입니다. 잠시 후 다시 시도해주세요.');
+         setIsPostcodeOpen(false);
+         setPostcodeTarget(null);
+      }
+    }, 100);
+  };
+
+  const addSpecialEvent = (e) => {
+    e.preventDefault();
+    if (!specialTitle || !specialDate) return;
+    setEvents([...events, { id: `special_${Date.now()}`, date: specialDate, type: 'special', specialType: specialType, title: specialTitle, color: generateColor('special') }]);
+    setSpecialTitle(''); setSpecialDate('');
+  };
+
+  const addTodoEvent = (e) => {
+    e.preventDefault();
+    if (!todoTitle || !todoDeadlineDate || !todoDeadlineTime) return;
+    const newTodo = {
+      id: `todo_${Date.now()}`, date: currentDate, type: 'todo', title: todoTitle, duration: parseInt(todoDuration),
+      deadline: `${todoDeadlineDate}T${todoDeadlineTime}:00`, startTime: null, endTime: null, startMin: null, endMin: null,
+      location: '자유(어디서든)', color: generateColor('todo'), completed: false
+    };
+    setEvents([...events, newTodo]);
+    setTodoTitle('');
+  };
+
+  const addSubjectEvent = (e) => {
+    e.preventDefault();
+    if (!subjectTitle) return;
+    const newSubject = {
+      id: `subj_${Date.now()}`, date: currentDate, type: 'subject', title: subjectTitle, 
+      duration: subjectDuration ? parseInt(subjectDuration) : 0, 
+      deadline: null, startTime: null, endTime: null, startMin: null, endMin: null,
+      location: '자유(어디서든)', color: generateColor('subject'), completed: false
+    };
+    setEvents([...events, newSubject]);
+    setSubjectTitle(''); setSubjectDuration('');
+  };
+
+  const deleteEvent = (id) => setEvents(events.filter(e => e.id !== id));
+  const toggleTodo = (id) => setEvents(events.map(e => e.id === id ? { ...e, completed: !e.completed } : e));
+
+  // ⭐️ 일주일 스마트 스케줄링 (식사시간 최우선 방어 & 교통수단 연동)
+  const autoScheduleWeekly = () => {
+    setIsGenerating(true);
+
+    setTimeout(() => {
+      const weekDates = [];
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(currentDate);
+        d.setDate(d.getDate() + i);
+        weekDates.push(d.toISOString().split('T')[0]);
+      }
+
+      let baseEvents = events.filter(e => e.type === 'fixed' || e.type === 'special' || e.completed || (e.startTime !== null && e.endMin !== null));
+      let itemsToSchedule = events.filter(e => (e.type === 'todo' || e.type === 'subject') && !e.completed && e.startTime === null);
+
+      // 1. 식사 시간 AI 유동 배분 (절대 누락되지 않도록 마감 기한을 여유 있게)
+      const autoMeals = [];
+      weekDates.forEach(dateStr => {
+        const dayEvents = baseEvents.filter(e => e.date === dateStr || (e.type === 'fixed' && e.recurringDay === new Date(dateStr).getDay()));
+        const hasBreakfast = dayEvents.some(e => e.category === 'meal' && e.title.includes('아침'));
+        const hasLunch = dayEvents.some(e => e.category === 'meal' && e.title.includes('점심'));
+        const hasDinner = dayEvents.some(e => e.category === 'meal' && e.title.includes('저녁'));
+        
+        // 고유 ID 생성을 위해 Math.random() 필수 사용 (누락 버그 해결)
+        if (!hasBreakfast) {
+          autoMeals.push({ id: `auto_meal_B_${dateStr}_${Math.random().toString(36).substring(2)}`, date: dateStr, type: 'auto_meal', category: 'meal', title: '🥪 아침 식사', duration: 40, deadline: `${dateStr}T11:00:00`, color: generateColor('meal'), completed: false, isAutoGenerated: true, startTime: null, endMin: null, location: homeLocation });
+        }
+        if (!hasLunch) {
+          autoMeals.push({ id: `auto_meal_L_${dateStr}_${Math.random().toString(36).substring(2)}`, date: dateStr, type: 'auto_meal', category: 'meal', title: '🍚 점심 식사', duration: 60, deadline: `${dateStr}T16:00:00`, color: generateColor('meal'), completed: false, isAutoGenerated: true, startTime: null, endMin: null, location: '현재 위치' });
+        }
+        if (!hasDinner) {
+          autoMeals.push({ id: `auto_meal_D_${dateStr}_${Math.random().toString(36).substring(2)}`, date: dateStr, type: 'auto_meal', category: 'meal', title: '🍽️ 저녁 식사', duration: 60, deadline: `${dateStr}T22:00:00`, color: generateColor('meal'), completed: false, isAutoGenerated: true, startTime: null, endMin: null, location: '현재 위치' });
+        }
+      });
+
+      // 2. 이동 시간(Travel Time) 자동 생성 로직 (경로 상세 객체 포함)
+      const travelEvents = [];
+      weekDates.forEach(dateStr => {
+        const dayFixed = baseEvents.filter(e => e.type === 'fixed' && (e.date === dateStr || e.recurringDay === new Date(dateStr).getDay())).sort((a,b)=>a.startMin - b.startMin);
+        
+        let lastLoc = homeLocation;
+        let lastEnd = timeToMinutes('07:00'); 
+        
+        dayFixed.forEach(f => {
+          const targetLoc = f.location || homeLocation;
+          if (targetLoc !== lastLoc && targetLoc !== '현재 위치' && targetLoc !== '자유(어디서든)' && targetLoc.trim() !== '') {
+            let tStart = Math.max(lastEnd, f.startMin - 40); 
+            const tEnd = f.startMin;
+            const duration = tEnd - tStart;
+            if (duration > 0) {
+              let recommend = duration > 20 ? '대중교통 추천' : '도보 추천';
+              travelEvents.push({
+                id: `travel_${f.id}_${dateStr}_${Math.random().toString(36).substr(2, 5)}`,
+                date: dateStr, type: 'travel', category: 'travel', title: `[이동] ${targetLoc} 도착`,
+                location: recommend,
+                routeDetails: { from: lastLoc, to: targetLoc, duration: duration, steps: generateMockRoute(lastLoc, targetLoc, duration) },
+                startMin: tStart, endMin: tEnd, startTime: minutesToTime(tStart), endTime: minutesToTime(tEnd),
+                color: '#94A3B8', completed: true, isAutoGenerated: true
+              });
+            }
+          }
+          lastLoc = targetLoc;
+          lastEnd = f.endMin;
+        });
+        
+        if (lastLoc !== homeLocation && lastLoc !== '현재 위치' && lastLoc !== '자유(어디서든)' && lastLoc.trim() !== '') {
+          const tStart = lastEnd;
+          const tEnd = Math.min(1440, lastEnd + 40);
+          const duration = tEnd - tStart;
+          if (duration > 0) {
+            let recommend = duration > 20 ? '대중교통 추천' : '도보 추천';
+            travelEvents.push({
+              id: `travel_home_${dateStr}_${Math.random().toString(36).substr(2, 5)}`,
+              date: dateStr, type: 'travel', category: 'travel', title: `[귀가] 🏠 집으로 이동`,
+              location: recommend,
+              routeDetails: { from: lastLoc, to: homeLocation, duration: duration, steps: generateMockRoute(lastLoc, homeLocation, duration) },
+              startMin: tStart, endMin: tEnd, startTime: minutesToTime(tStart), endTime: minutesToTime(tEnd),
+              color: '#94A3B8', completed: true, isAutoGenerated: true
+            });
+          }
+        }
+      });
+
+      baseEvents = [...baseEvents, ...travelEvents];
+
+      // 3. D-Day 시험 및 수행평가 대비 스케줄 생성
+      const specialEvents = baseEvents.filter(e => e.type === 'special');
+      const autoSubjects = [];
+      specialEvents.forEach(special => {
+        const maxOffset = special.specialType === 'perf' ? 1 : 5; 
+        for(let offset = 1; offset <= maxOffset; offset++) {
+          const dDate = new Date(special.date);
+          dDate.setDate(dDate.getDate() - offset);
+          const dStr = dDate.toISOString().split('T')[0];
+          
+          if (weekDates.includes(dStr)) {
+             autoSubjects.push({
+               id: `auto_${special.id}_D${offset}_${Math.random().toString(36).substring(2)}`, date: dStr, type: 'subject', 
+               title: `🔥 [D-${offset}] ${special.title} 대비`,
+               duration: (special.specialType === 'exam' && offset <= 2) ? 90 : 60, 
+               deadline: `${special.date}T23:59:00`,
+               startTime: null, endTime: null, startMin: null, endMin: null,
+               location: homeLocation, color: '#E11D48', completed: false, isAutoGenerated: true
+             });
+          }
+        }
+      });
+      const newAutoSubjects = autoSubjects.filter(auto => !baseEvents.some(e => e.date === auto.date && e.title === auto.title));
+
+      // 4. 자율 학습 시간 계산
+      const closestExam = specialEvents.sort((a,b) => new Date(a.date) - new Date(b.date))[0];
+      itemsToSchedule = [...itemsToSchedule, ...newAutoSubjects, ...autoMeals].map(item => {
+        if (item.type === 'subject' && (!item.duration || item.duration === 0)) {
+           let calculatedDuration = 50; 
+           if (closestExam) {
+               const daysToExam = (new Date(closestExam.date) - new Date(currentDate)) / (1000 * 3600 * 24);
+               if (daysToExam > 0 && daysToExam <= 7) calculatedDuration = 100;
+               else if (daysToExam > 7 && daysToExam <= 14) calculatedDuration = 70; 
+           }
+           return { ...item, duration: calculatedDuration, title: `${item.title} (AI자동할당)` };
+        }
+        return item;
+      });
+
+      // 5. 정렬 로직 (아침 -> 점심 -> 저녁 -> D-Day -> 마감일 -> 과목)
+      itemsToSchedule.sort((a, b) => {
+        if (a.title.includes('아침') && !b.title.includes('아침')) return -1;
+        if (!a.title.includes('아침') && b.title.includes('아침')) return 1;
+        if (a.category === 'meal' && b.category !== 'meal') return -1;
+        if (a.category !== 'meal' && b.category === 'meal') return 1;
+        
+        if (a.isAutoGenerated && !b.isAutoGenerated) return -1;
+        if (!a.isAutoGenerated && b.isAutoGenerated) return 1;
+        
+        if (a.deadline && b.deadline) return new Date(a.deadline) - new Date(b.deadline);
+        if (a.deadline) return -1;
+        if (b.deadline) return 1;
+        return a.type === 'subject' ? -1 : 1; 
+      });
+
+      // 6. 요일별 빈 슬롯 추출
+      const slotsByDate = {};
+      weekDates.forEach(dateStr => {
+        const dayEvents = baseEvents.filter(e => e.date === dateStr || (e.type === 'fixed' && e.recurringDay === new Date(dateStr).getDay())).sort((a,b)=>a.startMin - b.startMin);
+        let availableSlots = [];
+        let currentTime = timeToMinutes('07:00'); 
+        const endOfDay = timeToMinutes('23:30');  
+
+        for (const f of dayEvents) {
+          if (currentTime < f.startMin) availableSlots.push({ start: currentTime, duration: f.startMin - currentTime });
+          currentTime = Math.max(currentTime, f.endMin);
+        }
+        if (currentTime < endOfDay) availableSlots.push({ start: currentTime, duration: endOfDay - currentTime });
+        slotsByDate[dateStr] = availableSlots;
+      });
+
+      let scheduledEvents = [...baseEvents];
+      
+      // 7. 슬롯 분할 배분
+      itemsToSchedule.forEach(item => {
+        let remaining = item.duration;
+        let part = 1;
+        const chunkMax = item.category === 'meal' ? item.duration : 50; 
+        const totalParts = Math.ceil(remaining / chunkMax);
+
+        while (remaining > 0) {
+          let chunkDuration = Math.min(remaining, chunkMax);
+          let chunk = { 
+            ...item, originalId: item.id, id: `${item.id}_part${part}_${Math.random().toString(36).substring(2)}`, 
+            title: totalParts > 1 ? `${item.title} (${part}/${totalParts})` : item.title, 
+            duration: chunkDuration 
+          };
+          let scheduled = false;
+
+          for (const dateStr of weekDates) {
+            if (item.isAutoGenerated && item.date !== dateStr) continue; 
+            if (item.deadline && new Date(dateStr) > new Date(item.deadline.split('T')[0])) break; 
+
+            let slots = slotsByDate[dateStr];
+            
+            for (let i = 0; i < slots.length; i++) {
+              let slot = slots[i];
+              let actualStart = slot.start;
+              
+              if (item.category === 'meal') {
+                if (item.title.includes('아침')) actualStart = Math.max(slot.start, timeToMinutes('07:00'));
+                if (item.title.includes('점심')) actualStart = Math.max(slot.start, timeToMinutes('11:30'));
+                if (item.title.includes('저녁')) actualStart = Math.max(slot.start, timeToMinutes('17:30'));
+              }
+
+              let availableDuration = (slot.start + slot.duration) - actualStart;
+
+              if (availableDuration >= chunkDuration) {
+                const newStartMin = actualStart;
+                const newEndMin = actualStart + chunkDuration;
+                
+                if (item.deadline && new Date(`${dateStr}T${minutesToTime(newEndMin)}:00`) > new Date(item.deadline)) continue;
+
+                scheduledEvents.push({ ...chunk, date: dateStr, startTime: minutesToTime(newStartMin), endTime: minutesToTime(newEndMin), startMin: newStartMin, endMin: newEndMin });
+                
+                const breakTime = item.category === 'meal' ? 0 : 10; 
+                const leftoverBefore = actualStart - slot.start;
+                const leftoverAfter = (slot.start + slot.duration) - (newEndMin + breakTime);
+                
+                slots.splice(i, 1);
+                if (leftoverBefore > 0) slots.push({ start: slot.start, duration: leftoverBefore });
+                if (leftoverAfter > 0) slots.push({ start: newEndMin + breakTime, duration: leftoverAfter });
+                slots.sort((a,b) => a.start - b.start); 
+                
+                scheduled = true;
+                break;
+              }
+            }
+            if (scheduled) break;
+          }
+
+          if (!scheduled) scheduledEvents.push({...chunk, startTime: null, endMin: null, date: item.date || currentDate});
+          remaining -= chunkDuration;
+          part++;
+        }
+      });
+
+      setEvents(scheduledEvents);
+      setIsGenerating(false);
+    }, 1200); 
+  };
+
+  useEffect(() => {
+    if (activeTab !== 'planner') return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+
+    const cx = rect.width / 2;
+    const cy = rect.height / 2;
+    const radius = Math.max(0, Math.min(cx, cy) - 40);
+    if (radius <= 0) return; 
+
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    ctx.beginPath(); ctx.arc(cx, cy, radius, 0, 2 * Math.PI); ctx.fillStyle = '#F3F4F6'; ctx.fill();
+
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = '12px Pretendard, sans-serif'; ctx.fillStyle = '#6B7280'; 
+
+    for (let i = 0; i < 24; i++) {
+      const angle = (i / 24) * 2 * Math.PI - Math.PI / 2;
+      const textRadius = radius + 20;
+      ctx.fillText(i.toString(), cx + Math.cos(angle) * textRadius, cy + Math.sin(angle) * textRadius);
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(angle) * Math.max(0, radius - 5), cy + Math.sin(angle) * Math.max(0, radius - 5));
+      ctx.lineTo(cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius);
+      ctx.strokeStyle = '#D1D5DB'; ctx.stroke();
+    }
+
+    const drawArc = (startMin, endMin, color) => {
+      if (startMin == null || endMin == null) return;
+      const startAngle = (startMin / 1440) * 2 * Math.PI - Math.PI / 2;
+      const endAngle = (endMin / 1440) * 2 * Math.PI - Math.PI / 2;
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, radius, startAngle, endAngle); ctx.fillStyle = color; ctx.fill();
+    };
+
+    dailyEvents.forEach(event => {
+      if (event.startMin != null && event.endMin != null && event.type !== 'special') {
+        const alpha = ((event.type === 'todo' || event.type === 'subject') && event.completed) ? '66' : 'FF';
+        drawArc(event.startMin, event.endMin, event.color + alpha);
+      }
+    });
+
+    ctx.beginPath(); ctx.arc(cx, cy, radius * 0.4, 0, 2 * Math.PI); ctx.fillStyle = '#FFFFFF'; ctx.fill();
+    ctx.fillStyle = '#111827'; ctx.font = 'bold 16px Pretendard, sans-serif'; ctx.fillText('24 Hours', cx, cy - 10);
+    ctx.font = '14px Pretendard, sans-serif'; ctx.fillStyle = '#6B7280';
+    
+    const totalStudyMins = dailyEvents.reduce((acc, cur) => {
+       if(cur.startMin != null && cur.endMin != null && (cur.type === 'todo' || cur.type === 'subject' || (cur.type === 'fixed' && cur.category === 'academy'))) {
+         return acc + (cur.endMin - cur.startMin);
+       }
+       return acc;
+    }, 0);
+    ctx.fillText(`${Math.floor(totalStudyMins/60)}h ${totalStudyMins%60}m 학습`, cx, cy + 15);
+  }, [dailyEvents, activeTab]);
+
+  const getWeekDates = () => {
+    const dates = [];
+    for (let i = -3; i <= 3; i++) { const d = new Date(currentDate); d.setDate(d.getDate() + i); dates.push(d); }
+    return dates;
+  };
+
+  return (
+    <div className="flex h-screen bg-slate-50 font-sans text-slate-800 overflow-hidden">
+      
+      {/* ⭐️ 왼쪽 사이드바 (지도 탭 추가됨!) */}
+      <aside className="w-16 md:w-64 bg-white border-r border-slate-200 flex flex-col items-center md:items-stretch py-6 flex-shrink-0 z-10 overflow-y-auto">
+        <div className="flex items-center justify-center md:justify-start md:px-6 mb-8">
+          <Target className="w-8 h-8 text-rose-600" />
+          <span className="ml-3 text-xl font-bold text-slate-900 hidden md:block">시험대비 플래너</span>
+        </div>
+        <nav className="flex-1 w-full space-y-2 px-2 md:px-4">
+          <button onClick={() => setActiveTab('planner')} className={`w-full flex items-center justify-center md:justify-start px-2 md:px-4 py-3 rounded-xl transition-colors ${activeTab === 'planner' ? 'bg-rose-50 text-rose-600' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-900'}`}>
+            <BookOpen className="w-5 h-5 md:mr-3" /><span className="font-medium hidden md:block">하루/주간 뷰</span>
+          </button>
+          <button onClick={() => setActiveTab('calendar')} className={`w-full flex items-center justify-center md:justify-start px-2 md:px-4 py-3 rounded-xl transition-colors ${activeTab === 'calendar' ? 'bg-rose-50 text-rose-600' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-900'}`}>
+            <Calendar className="w-5 h-5 md:mr-3" /><span className="font-medium hidden md:block">전체 달력</span>
+          </button>
+          <button onClick={() => setActiveTab('map')} className={`w-full flex items-center justify-center md:justify-start px-2 md:px-4 py-3 rounded-xl transition-colors ${activeTab === 'map' ? 'bg-rose-50 text-rose-600' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-900'}`}>
+            <Map className="w-5 h-5 md:mr-3" /><span className="font-medium hidden md:block">지도 탐색</span>
+          </button>
+        </nav>
+      </aside>
+
+      {/* 메인 컨텐츠 */}
+      <main className="flex-1 overflow-y-auto bg-slate-50 relative">
+        
+        {/* 1. 달력 뷰 */}
+        {activeTab === 'calendar' && (
+          <div className="p-4 md:p-8 max-w-5xl mx-auto min-h-full flex flex-col">
+            <header className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-6">
+              <h2 className="text-2xl font-bold text-slate-800">{calYear}년 {calMonth + 1}월</h2>
+              <div className="flex space-x-2">
+                <button onClick={() => { if (calMonth === 0) { setCalMonth(11); setCalYear(calYear - 1); } else setCalMonth(calMonth - 1); }} className="p-2 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-600 transition-colors"><span className="text-sm font-bold">← 이전</span></button>
+                <button onClick={() => { setCalMonth(new Date().getMonth()); setCalYear(new Date().getFullYear()); setCurrentDate(new Date().toISOString().split('T')[0]); }} className="p-2 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-600 font-medium transition-colors">이번 달</button>
+                <button onClick={() => { if (calMonth === 11) { setCalMonth(0); setCalYear(calYear + 1); } else setCalMonth(calMonth + 1); }} className="p-2 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-600 transition-colors"><span className="text-sm font-bold">다음 →</span></button>
+              </div>
+            </header>
+            <div className="flex-1 bg-white rounded-2xl shadow-sm border border-slate-100 p-6 flex flex-col">
+              <div className="grid grid-cols-7 mb-4">
+                {['일', '월', '화', '수', '목', '금', '토'].map(day => (
+                  <div key={day} className={`text-center font-semibold text-sm ${day === '일' ? 'text-red-500' : day === '토' ? 'text-blue-500' : 'text-slate-500'}`}>{day}</div>
+                ))}
+              </div>
+              <div className="grid grid-cols-7 flex-1 auto-rows-fr gap-2 md:gap-4">
+                {Array.from({ length: new Date(calYear, calMonth, 1).getDay() }).map((_, i) => <div key={`empty-${i}`} className="p-2 border border-transparent"></div>)}
+                {Array.from({ length: new Date(calYear, calMonth + 1, 0).getDate() }).map((_, i) => {
+                  const day = i + 1; const dateStr = `${calYear}-${String(calMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                  const isToday = new Date().toISOString().split('T')[0] === dateStr;
+                  const dayEvents = getEventsForDate(dateStr); const hasSpecial = dayEvents.some(e => e.type === 'special');
+                  return (
+                    <div key={day} onClick={() => { setCurrentDate(dateStr); setActiveTab('planner'); }}
+                      className={`p-2 border rounded-xl flex flex-col transition-all cursor-pointer hover:shadow-md hover:-translate-y-0.5
+                        ${currentDate === dateStr ? 'border-rose-500 ring-2 ring-rose-200' : 'border-slate-100'} 
+                        ${isToday ? 'bg-rose-50/50' : 'bg-white'} ${hasSpecial ? 'bg-rose-50/30' : ''}`}
+                      style={{ minHeight: '80px' }}
+                    >
+                      <div className="flex justify-between items-start">
+                        <span className={`text-sm font-bold mb-1 ${isToday ? 'text-rose-600' : 'text-slate-700'}`}>{day}</span>
+                        {hasSpecial && <AlertCircle className="w-3 h-3 text-rose-500" />}
+                      </div>
+                      <div className="flex flex-wrap gap-1 mt-auto">
+                        {dayEvents.filter(e => e.type !== 'special' && e.type !== 'travel').slice(0, 5).map(e => <div key={e.id} className="w-2 h-2 rounded-full" style={{ backgroundColor: e.color }} title={e.title}></div>)}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 2. 지도 탐색 뷰 (신규) */}
+        {activeTab === 'map' && (
+          <div className="flex flex-col md:flex-row h-full">
+            {/* 좌측 패널 (경로 상세) */}
+            <div className="w-full md:w-1/3 bg-white border-r border-slate-200 p-6 flex flex-col overflow-y-auto">
+              <button onClick={() => setActiveTab('planner')} className="self-start mb-6 text-sm text-slate-500 hover:text-slate-800 flex items-center">
+                ← 플래너로 돌아가기
+              </button>
+              
+              <h2 className="text-xl font-bold text-slate-800 mb-6 flex items-center">
+                <Map className="w-6 h-6 mr-2 text-indigo-600" /> 상세 이동 경로
+              </h2>
+
+              {!selectedRoute ? (
+                <div className="flex flex-col items-center justify-center flex-1 text-slate-400 text-center space-y-4">
+                  <MapPin className="w-12 h-12 opacity-20" />
+                  <p>플래너의 이동시간 항목에서<br/><b>[🗺️ 경로 상세 보기]</b> 버튼을<br/>클릭해 주세요!</p>
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  {/* 출발 / 도착 요약 */}
+                  <div className="bg-slate-50 rounded-xl p-4 border border-slate-100">
+                    <div className="flex items-center mb-3">
+                      <div className="w-2 h-2 rounded-full bg-blue-500 mr-3"></div>
+                      <span className="font-semibold text-slate-800 flex-1 truncate">{selectedRoute.routeDetails.from}</span>
+                    </div>
+                    <div className="flex flex-col items-center w-2 h-6 border-l-2 border-dashed border-slate-300 ml-[3px] mb-3"></div>
+                    <div className="flex items-center">
+                      <div className="w-2 h-2 rounded-full bg-rose-500 mr-3"></div>
+                      <span className="font-semibold text-slate-800 flex-1 truncate">{selectedRoute.routeDetails.to}</span>
+                    </div>
+                    <div className="mt-4 pt-4 border-t border-slate-200 flex justify-between items-center text-sm">
+                      <span className="text-slate-500">예상 소요 시간</span>
+                      <span className="font-bold text-indigo-600 text-lg">{selectedRoute.routeDetails.duration}분</span>
+                    </div>
+                  </div>
+
+                  {/* 상세 스텝 */}
+                  <div className="space-y-0">
+                    {selectedRoute.routeDetails.steps.map((step, idx) => (
+                      <div key={idx} className="flex group">
+                        <div className="flex flex-col items-center mr-4">
+                          <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm z-10 ${step.type === 'walk' ? 'bg-slate-100' : 'bg-indigo-100'}`}>
+                            {step.icon}
+                          </div>
+                          {idx !== selectedRoute.routeDetails.steps.length - 1 && (
+                            <div className="w-0.5 h-full bg-slate-200 my-1 group-hover:bg-indigo-200 transition-colors"></div>
+                          )}
+                        </div>
+                        <div className="pb-8 pt-1 flex-1">
+                          <h4 className={`font-bold ${step.type === 'walk' ? 'text-slate-600' : 'text-indigo-700'}`}>{step.title}</h4>
+                          <p className="text-sm text-slate-500 mt-1">{step.desc}</p>
+                          <span className="text-xs font-medium text-slate-400 bg-slate-50 px-2 py-0.5 rounded mt-2 inline-block">약 {step.time}분</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            
+            {/* 우측 패널 (실제 지도 배경 - OpenStreetMap Iframe으로 연출) */}
+            <div className="hidden md:flex flex-1 bg-slate-100 relative items-center justify-center">
+               <iframe 
+                 title="Map View"
+                 width="100%" 
+                 height="100%" 
+                 frameBorder="0" 
+                 scrolling="no" 
+                 marginHeight="0" 
+                 marginWidth="0" 
+                 src="https://www.openstreetmap.org/export/embed.html?bbox=126.90,37.48,127.10,37.58&layer=mapnik" 
+                 className="absolute inset-0 opacity-70"
+               ></iframe>
+               {!selectedRoute && (
+                 <div className="z-10 bg-white/90 backdrop-blur px-6 py-4 rounded-2xl shadow-lg border border-white/50 text-slate-700 font-medium">
+                   👈 좌측에서 일정을 선택하여 지도를 활성화하세요
+                 </div>
+               )}
+            </div>
+          </div>
+        )}
+
+        {/* 3. 플래너 뷰 */}
+        {activeTab === 'planner' && (
+          <div className="p-4 md:p-8 max-w-6xl mx-auto space-y-6 pb-20">
+            {/* 상단 주간 네비게이션 */}
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-4 flex justify-between items-center overflow-x-auto gap-2">
+              {getWeekDates().map(d => {
+                const dateStr = d.toISOString().split('T')[0]; const isSelected = dateStr === currentDate; const isToday = dateStr === new Date().toISOString().split('T')[0];
+                const dayName = ['일', '월', '화', '수', '목', '금', '토'][d.getDay()];
+                return (
+                  <button key={dateStr} onClick={() => setCurrentDate(dateStr)}
+                    className={`flex flex-col items-center p-3 min-w-[4rem] rounded-xl transition-all ${isSelected ? 'bg-rose-600 text-white shadow-md scale-105' : 'hover:bg-slate-100 text-slate-600'}`}
+                  >
+                    <span className="text-xs font-medium mb-1">{isToday ? '오늘' : dayName}</span>
+                    <span className={`text-lg font-bold ${isSelected ? 'text-white' : 'text-slate-900'}`}>{d.getDate()}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <header className="flex flex-col md:flex-row justify-between items-start md:items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+              <div>
+                <h1 className="text-2xl font-bold flex items-center text-slate-900">{currentDate} 스케줄</h1>
+                <p className="text-slate-500 mt-1 text-sm">
+                  {todaySpecials.length > 0 ? (
+                    <span className="text-rose-500 font-medium flex items-center"><AlertCircle className="w-4 h-4 mr-1" /> 오늘 중요한 일정({todaySpecials.map(s=>s.title).join(', ')})이 있어요!</span>
+                  ) : '시험을 향해 오늘도 달려봐요!'}
+                </p>
+              </div>
+            </header>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              {/* 입력 폼 영역 */}
+              <div className="lg:col-span-4 flex flex-col space-y-4">
+
+                <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 border-l-4 border-l-indigo-400">
+                  <h2 className="text-base font-semibold flex items-center mb-3 text-slate-800"><MapPin className="w-4 h-4 mr-2 text-indigo-500" /> 0. 내 집 위치 설정</h2>
+                  <div className="relative">
+                    <div className="flex items-center bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                      <input type="text" placeholder="우리 집 주소 검색" value={homeLocation} onChange={(e) => setHomeLocation(e.target.value)} className="w-full text-sm bg-transparent focus:outline-none" />
+                      <button type="button" onClick={() => togglePostcode('home')} className="ml-2 px-2 py-1 bg-indigo-100 text-indigo-600 rounded text-xs hover:bg-indigo-200 whitespace-nowrap transition-colors">
+                        {isPostcodeOpen && postcodeTarget === 'home' ? '닫기' : '주소 검색'}
+                      </button>
+                    </div>
+                    {isPostcodeOpen && postcodeTarget === 'home' && (
+                      <div className="w-full mt-2 border border-slate-200 rounded-lg overflow-hidden h-64 relative" ref={postcodeRef}></div>
+                    )}
+                  </div>
+                </div>
+                
+                <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 border-l-4 border-l-orange-400">
+                  <h2 className="text-base font-semibold flex items-center mb-3 text-slate-800"><Coffee className="w-4 h-4 mr-2 text-orange-500" /> 1. 일상 및 학원 (장소 입력)</h2>
+                  <form onSubmit={addFixedEvent} className="space-y-3">
+                    <div className="flex space-x-2 mb-2">
+                      <label className="text-xs flex items-center cursor-pointer"><input type="radio" name="cat" value="academy" checked={fixedCategory === 'academy'} onChange={(e) => setFixedCategory(e.target.value)} className="mr-1 text-orange-500" />학원/일정</label>
+                      <label className="text-xs flex items-center cursor-pointer"><input type="radio" name="cat" value="meal" checked={fixedCategory === 'meal'} onChange={(e) => setFixedCategory(e.target.value)} className="mr-1 text-orange-500" />식사</label>
+                      <label className="text-xs flex items-center cursor-pointer"><input type="radio" name="cat" value="sleep" checked={fixedCategory === 'sleep'} onChange={(e) => setFixedCategory(e.target.value)} className="mr-1 text-orange-500" />수면</label>
+                    </div>
+                    <input type="text" placeholder={fixedCategory === 'meal' ? "예: 저녁 식사" : fixedCategory === 'sleep' ? "취침" : "예: 수학 특강"} value={fixedTitle} onChange={(e) => setFixedTitle(e.target.value)} className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-orange-500" required />
+                    
+                    {fixedCategory === 'academy' && (
+                      <div className="relative">
+                        <div className="flex items-center bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                          <MapPin className="w-4 h-4 text-slate-400 mr-2" />
+                          <input type="text" placeholder="직접 입력 또는 주소 검색" value={fixedLocation} onChange={(e) => setFixedLocation(e.target.value)} className="w-full text-sm bg-transparent focus:outline-none" />
+                          <button type="button" onClick={() => togglePostcode('fixed')} className="ml-2 px-2 py-1 bg-indigo-100 text-indigo-600 rounded text-xs hover:bg-indigo-200 whitespace-nowrap transition-colors">
+                            {isPostcodeOpen && postcodeTarget === 'fixed' ? '닫기' : '주소 검색'}
+                          </button>
+                        </div>
+                        {isPostcodeOpen && postcodeTarget === 'fixed' && (
+                          <div className="w-full mt-2 border border-slate-200 rounded-lg overflow-hidden h-64 relative" ref={postcodeRef}></div>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="flex space-x-2">
+                      <input type="time" value={fixedStart} onChange={(e) => setFixedStart(e.target.value)} className="flex-1 px-2 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg" required />
+                      <input type="time" value={fixedEnd} onChange={(e) => setFixedEnd(e.target.value)} className="flex-1 px-2 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg" required />
+                    </div>
+                    <label className="flex items-center text-sm text-slate-600 cursor-pointer pt-1"><input type="checkbox" checked={isRecurring} onChange={(e) => setIsRecurring(e.target.checked)} className="mr-2 rounded text-orange-500 focus:ring-orange-500" /> 매주 이 요일에 반복</label>
+                    <button type="submit" className="w-full bg-slate-900 text-white py-2 text-sm rounded-lg hover:bg-slate-800 font-medium">일정 추가</button>
+                  </form>
+                </div>
+
+                <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 border-l-4 border-l-purple-400">
+                  <h2 className="text-base font-semibold flex items-center mb-1 text-slate-800"><AlertCircle className="w-4 h-4 mr-2 text-purple-500" /> 2. 시험/수행평가 (D-Day) 등록</h2>
+                  <p className="text-[10px] text-purple-500 mb-3">💡 시험은 5일 전, 수행평가는 1일 전부터 대비 일정이 자동 생성됩니다!</p>
+                  <form onSubmit={addSpecialEvent} className="space-y-3">
+                    <div className="flex space-x-4 mb-2">
+                      <label className="text-xs flex items-center cursor-pointer"><input type="radio" value="exam" checked={specialType === 'exam'} onChange={(e) => setSpecialType(e.target.value)} className="mr-1 text-purple-500" />📝 지필 시험</label>
+                      <label className="text-xs flex items-center cursor-pointer"><input type="radio" value="perf" checked={specialType === 'perf'} onChange={(e) => setSpecialType(e.target.value)} className="mr-1 text-purple-500" />🎨 수행평가</label>
+                    </div>
+                    <input type="text" placeholder={specialType === 'exam' ? "예: 수학 중간고사" : "예: 과학 보고서 제출"} value={specialTitle} onChange={(e) => setSpecialTitle(e.target.value)} className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500" required />
+                    <input type="date" value={specialDate} onChange={(e) => setSpecialDate(e.target.value)} className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-purple-500" required />
+                    <button type="submit" className="w-full bg-purple-500 text-white py-2 text-sm rounded-lg hover:bg-purple-600 font-medium">D-Day 등록</button>
+                  </form>
+                </div>
+
+                <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 border-l-4 border-l-emerald-400 flex flex-col space-y-5">
+                  <div>
+                    <h2 className="text-base font-semibold flex items-center mb-2 text-slate-800"><FileText className="w-4 h-4 mr-2 text-emerald-500" /> 3. 과제 / 숙제 (마감 지정)</h2>
+                    <form onSubmit={addTodoEvent} className="flex flex-col space-y-2">
+                      <input type="text" placeholder="예: 영어 단어 암기, 수학 프린트" value={todoTitle} onChange={(e) => setTodoTitle(e.target.value)} className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-emerald-500" required />
+                      <div className="flex space-x-2 items-center">
+                        <div className="flex-1 flex flex-col"><span className="text-[10px] text-slate-500 ml-1">마감일</span><input type="date" value={todoDeadlineDate} onChange={(e) => setTodoDeadlineDate(e.target.value)} className="w-full px-2 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg" required /></div>
+                        <div className="w-24 flex flex-col"><span className="text-[10px] text-slate-500 ml-1">마감시간</span><input type="time" value={todoDeadlineTime} onChange={(e) => setTodoDeadlineTime(e.target.value)} className="w-full px-2 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg" required /></div>
+                        <div className="w-16 flex flex-col"><span className="text-[10px] text-slate-500 ml-1">소요(분)</span><input type="number" min="10" step="10" value={todoDuration} onChange={(e) => setTodoDuration(e.target.value)} className="w-full px-2 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg" required /></div>
+                      </div>
+                      <button type="submit" className="bg-emerald-500 text-white py-2 rounded-lg hover:bg-emerald-600 text-sm font-medium">과제 추가</button>
+                    </form>
+                  </div>
+                  <hr className="border-slate-100" />
+                  <div>
+                    <h2 className="text-base font-semibold flex items-center mb-1 text-slate-800"><Book className="w-4 h-4 mr-2 text-blue-500" /> 4. 자율 학습 추가</h2>
+                    <p className="text-[10px] text-slate-500 mb-2">시간을 비워두면 AI가 D-Day에 맞춰 자동 배분합니다.</p>
+                    <form onSubmit={addSubjectEvent} className="flex space-x-2">
+                      <input type="text" placeholder="수학 모의고사 풀이" value={subjectTitle} onChange={(e) => setSubjectTitle(e.target.value)} className="flex-1 px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500" required />
+                      <input type="number" min="10" step="10" placeholder="자동" value={subjectDuration} onChange={(e) => setSubjectDuration(e.target.value)} className="w-16 px-2 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg" />
+                      <button type="submit" className="bg-blue-500 text-white p-2 rounded-lg hover:bg-blue-600"><Plus className="w-4 h-4" /></button>
+                    </form>
+                  </div>
+                </div>
+
+              </div>
+
+              {/* 우측 패널 */}
+              <div className="lg:col-span-8 space-y-6">
+                
+                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 flex flex-col items-center">
+                  <div className="w-full bg-rose-50 border border-rose-100 rounded-xl p-4 mb-6 flex flex-col sm:flex-row justify-between items-center gap-4">
+                    <div>
+                      <h3 className="font-bold text-rose-900 flex items-center"><Target className="w-4 h-4 mr-2" /> 시험 중심 AI 스케줄러</h3>
+                      <p className="text-xs text-rose-700 mt-1"><strong>이동시간(교통수단 추천)과 아침/점심/저녁 식사</strong>까지 AI가 빈틈없이 채워줍니다.</p>
+                    </div>
+                    <button 
+                      onClick={autoScheduleWeekly} disabled={isGenerating}
+                      className={`text-sm flex-shrink-0 flex items-center px-5 py-2.5 rounded-lg transition-all font-bold shadow-sm ${isGenerating ? 'bg-rose-200 text-rose-500 cursor-not-allowed' : 'text-white bg-rose-600 hover:bg-rose-700 hover:shadow-md'}`}
+                    >
+                      {isGenerating ? '스케줄 계산 중...' : '일주일 완벽 자동 스케줄링'}
+                    </button>
+                  </div>
+
+                  <h2 className="text-lg font-semibold text-slate-800 self-start mb-4">오늘의 타임라인</h2>
+                  <div className="relative w-full max-w-sm aspect-square">
+                    <canvas ref={canvasRef} className="w-full h-full" style={{ touchAction: 'none' }} />
+                  </div>
+
+                  <div className="mt-6 flex flex-wrap justify-center gap-4 text-sm">
+                    <div className="flex items-center"><div className="w-3 h-3 rounded-full mr-2" style={{backgroundColor: '#F87171'}}></div><span className="text-slate-600">학원</span></div>
+                    <div className="flex items-center"><div className="w-3 h-3 rounded-full mr-2" style={{backgroundColor: '#FDBA74'}}></div><span className="text-slate-600">식사</span></div>
+                    <div className="flex items-center"><div className="w-3 h-3 rounded-full mr-2" style={{backgroundColor: '#10B981'}}></div><span className="text-slate-600">과제/숙제</span></div>
+                    <div className="flex items-center"><div className="w-3 h-3 rounded-full mr-2" style={{backgroundColor: '#60A5FA'}}></div><span className="text-slate-600">자율 학습</span></div>
+                    <div className="flex items-center"><div className="w-3 h-3 rounded-full mr-2" style={{backgroundColor: '#94A3B8'}}></div><span className="text-slate-600">이동시간</span></div>
+                  </div>
+                </div>
+
+                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+                   <h2 className="text-lg font-semibold mb-4 text-slate-800">선택된 날짜 스케줄 상세</h2>
+                   {dailyEvents.length === 0 ? (
+                     <div className="text-center py-10 text-slate-400 flex flex-col items-center">
+                       <Clock className="w-12 h-12 mb-3 opacity-20" />
+                       <p>아직 등록된 스케줄이 없습니다.</p>
+                     </div>
+                   ) : (
+                     <div className="space-y-3">
+                       {[...dailyEvents].sort((a, b) => {
+                         if (a.startMin == null) return -1;
+                         if (b.startMin == null) return 1;
+                         return a.startMin - b.startMin;
+                       }).map(event => (
+                         <div key={event.id} className={`flex flex-col p-4 rounded-xl border ${event.completed ? 'opacity-60 bg-slate-50 border-slate-200' : 'bg-white border-slate-100 shadow-sm'} transition-all hover:shadow-md`} style={{ borderLeftColor: event.color, borderLeftWidth: '4px' }}>
+                           
+                           <div className="flex items-center justify-between">
+                             <div className="flex items-center flex-1">
+                               {(event.type === 'todo' || event.type === 'subject') && (
+                                 <button onClick={() => toggleTodo(event.id)} className={`mr-3 transition-colors ${event.type === 'todo' ? 'text-slate-400 hover:text-emerald-500' : 'text-slate-400 hover:text-blue-500'}`}>
+                                   <CheckCircle className={`w-6 h-6 ${event.completed ? (event.type === 'todo' ? 'text-emerald-500 fill-emerald-50' : 'text-blue-500 fill-blue-50') : ''}`} />
+                                 </button>
+                               )}
+                               <div>
+                                 <h3 className={`font-semibold flex items-center ${event.completed ? 'line-through text-slate-500' : 'text-slate-800'}`}>
+                                   {event.title}
+                                   
+                                   {/* 장소 표시 (이동 시간이 아닐 때) */}
+                                   {event.location && event.location !== '자유(어디서든)' && event.location !== homeLocation && event.type !== 'travel' && (
+                                      <span className="ml-2 text-xs text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md flex items-center">
+                                        <MapPin className="w-3 h-3 mr-1" />{event.location}
+                                      </span>
+                                   )}
+                                 </h3>
+                                 
+                                 <p className="text-sm text-slate-500 mt-1 flex items-center gap-2">
+                                   {event.startTime && event.endTime ? <span className="flex items-center"><Clock className="w-3 h-3 mr-1" /> {event.startTime} ~ {event.endTime}</span> : <span className="text-orange-500 text-xs font-medium bg-orange-50 px-2 py-0.5 rounded">미정 (대기 중)</span>}
+                                   {event.deadline && <span className="text-[10px] bg-red-50 text-red-600 px-2 py-0.5 rounded-full border border-red-100 flex items-center"><AlertCircle className="w-3 h-3 mr-1" /> {formatDeadline(event.deadline)} 마감</span>}
+                                 </p>
+                               </div>
+                             </div>
+                             
+                             <div className="flex items-center space-x-2">
+                               <span className={`text-xs px-2 py-1 rounded-full font-medium ${event.type === 'travel' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-600'}`}>
+                                 {event.type === 'travel' ? '이동' : event.category === 'meal' ? '식사' : event.category === 'sleep' ? '수면' : event.type === 'fixed' ? '학원/일정' : event.type === 'todo' ? '과제' : '학습'}
+                               </span>
+                               <button onClick={() => deleteEvent(event.id)} className="p-2 text-slate-400 hover:text-red-500 transition-colors rounded-lg hover:bg-red-50"><Trash2 className="w-4 h-4" /></button>
+                             </div>
+                           </div>
+
+                           {/* 🗺️ 경로 상세 보기 버튼 (이동 시간일 경우에만 표시) */}
+                           {event.type === 'travel' && event.routeDetails && (
+                             <div className="mt-3 ml-1 pl-3 border-l-2 border-dashed border-slate-200">
+                                <span className="text-xs text-slate-500 mr-2 flex items-center mb-2">
+                                  <Navigation className="w-3 h-3 mr-1" /> {event.location}
+                                </span>
+                                <button 
+                                  onClick={() => { setSelectedRoute(event); setActiveTab('map'); }}
+                                  className="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-3 py-1.5 rounded-md flex items-center transition-colors"
+                                >
+                                  <Map className="w-3 h-3 mr-1" /> 상세 경로 확인하기
+                                </button>
+                             </div>
+                           )}
+
+                         </div>
+                       ))}
+                     </div>
+                   )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
